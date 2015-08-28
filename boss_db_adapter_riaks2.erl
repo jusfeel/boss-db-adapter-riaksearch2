@@ -3,7 +3,7 @@
 -export([init/1, terminate/1, start/1, stop/0, find/2, find/7]).
 -export([count/3, counter/2, incr/2, incr/3, delete/2, save_record/2]).
 -export([push/2, pop/2]).
--export([setup_model/1, setup_model/2, clear_index/1, reindex/1]).
+-export([setup_model/1, setup_model/2, clear_index/1, reindex/1, re_index/1, re_index/2]).
 
 -define(LOG(Name, Value), lager:debug("DEBUG: ~s: ~p~n", [Name, Value])).
 
@@ -65,35 +65,40 @@ find_acc(Conn, Prefix, [Id | Rest], Acc) ->
 
 find(Conn, Type, Conditions, Max, Skip, Sort, SortOrder) ->
     Index = type_to_index(Type),
-    {ok, Keys} = get_keys(Conn, Conditions, Index),
-    Records = find_acc(Conn, atom_to_list(Type) ++ "-", Keys, []),
-    %io:format("##[Max:~p,Skip:~p,Sort:~p,SortOrder:~p]~n",[Max, Skip, Sort, SortOrder]),
-    %io:format("Records:~p~n",[Records]),
-    Sorted = if
-        Sort =:= id -> Records;
-        is_atom(Sort) ->
-            lists:sort(fun (A, B) ->
-                        case SortOrder of
-                            ascending  -> A:Sort() =< B:Sort();
-                            descending -> A:Sort() > B:Sort()
-                        end
-                end,
-                Records);
-        true -> Records
-    end,
-    case Max of
-        all -> lists:nthtail(Skip, Sorted);
-        Max when Skip < length(Sorted) ->
-            lists:sublist(Sorted, Skip + 1, Max);
-        _ ->
-            []
-    end.
+    Options = get_search_options(Max, Skip, Sort, SortOrder),
+    %io:format("Options:~p~n", [Options]),
+    {ok, Keys} = get_keys(Conn, Conditions, Index, Options),
+    find_acc(Conn, atom_to_list(Type) ++ "-", Keys, []).
 
-get_keys(Conn, Cond, Index) ->
+get_count(Conn, Type, Conditions, Max, Skip, Sort, SortOrder) ->
+  Index = type_to_index(Type),
+  Options = get_search_options(Max, Skip, Sort, SortOrder),
+  Query = build_search_query(Conditions),
+  {ok, Results} = riakc_pb_socket:search(Conn, Index, list_to_binary(Query), Options), 
+  Results#search_results.num_found.
+
+get_search_options(Max, Skip, Sort, SortOrder) ->
+  case Max of
+    all -> RowsOp = {rows, 10000000};
+    Max -> RowsOp = {rows, Max}
+  end,
+  StartOp = {start, Skip},
+  if Sort =/= id, Sort =/= 0 ->
+	 		 case SortOrder of
+	 			 ascending -> SortOp = [{sort, atom_to_list(Sort) ++ " asc"}];
+		 		 descending -> SortOp = [{sort, atom_to_list(Sort) ++ " desc"}];
+         _ -> SortOp = []
+			 end;
+     true ->
+       SortOp = []
+  end,
+  lists:append([StartOp, RowsOp], SortOp).
+
+get_keys(Conn, Cond, Index, Options) ->
     io:format("Conditions:~p~n",[Cond]),
     Conditions = build_search_query(Cond),
     io:format("Query:~p~n",[Conditions]),
-    {ok, Results} = riakc_pb_socket:search(Conn, Index, list_to_binary(Conditions),[]),
+    {ok, Results} = riakc_pb_socket:search(Conn, Index, list_to_binary(Conditions), Options),
     Result = Results#search_results.docs,
     {ok, lists:map(fun ({_,X}) ->
 			   proplists:get_value(<<"_yz_rk">>, X)
@@ -101,7 +106,7 @@ get_keys(Conn, Cond, Index) ->
 
 % this is a stub just to make the tests runable
 count(Conn, Type, Conditions) ->
-    length(find(Conn, Type, Conditions, all, 0, 0, 0)).
+  get_count(Conn, Type, Conditions, all, 0, 0, 0).
 
 counter(_Conn, _Id) ->
     {error, notimplemented}.
@@ -256,7 +261,7 @@ riak_search_encode_key(K) ->
     list_to_binary(atom_to_list(K)).
 
 riak_search_encode_value(V) when is_list(V) ->
-    list_to_binary(V);
+  list_to_binary(V);
 riak_search_encode_value(V) ->
     V.
 
@@ -267,7 +272,7 @@ riak_search_decode_key(K) ->
     list_to_atom(binary_to_list(K)).
 
 riak_search_decode_value(V) when is_binary(V) ->
-    binary_to_list(V);
+  binary_to_list(V);
 riak_search_decode_value(V) ->
     V.
 
@@ -359,7 +364,15 @@ reindex(Model) when is_atom(Model) ->
   io:format("Done!~n"),
   riakc_pb_socket:stop(Conn).
 
+re_index(Model) ->
+  re_index(Model, []).
 
+re_index(Model, Opts) ->
+  clear_index(Model),
+  timer:sleep(2000),
+  setup_model(Model, Opts),
+  timer:sleep(2000),
+  reindex(Model).
 
 
 
